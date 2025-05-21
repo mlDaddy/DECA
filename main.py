@@ -10,6 +10,7 @@ def main():
 
     # Create and launch the interface
     app = gui.create_interface()
+    app.queue()
     app.launch(share=True)
 
 if __name__ == "__main__":

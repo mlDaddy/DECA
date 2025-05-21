@@ -5,6 +5,9 @@ from PIL import Image
 import datetime
 import tkinter as tk
 from tkinter import filedialog
+import torch
+import shutil
+from face_reconstruction import reconstruct_3d_face
 
 class ImageGeneratorGUI:
     def __init__(self, api_handler):
@@ -16,6 +19,9 @@ class ImageGeneratorGUI:
         self.output_dir = os.path.join(os.getcwd(), "generated_images")
         if not os.path.exists(self.output_dir):
             os.makedirs(self.output_dir)
+
+        # Store the last generated image for 3D reconstruction
+        self.last_generated_image = None
 
     def create_interface(self):
         with gr.Blocks(title="OpenAI Image Generator") as app:
@@ -61,38 +67,101 @@ class ImageGeneratorGUI:
             test_image_input = gr.Image(label="Test Image (for Test Mode)", type="pil", visible=False)
 
             generate_btn = gr.Button("Generate Image")
+
             progress = gr.Slider(0, 100, value=0, label="Progress")
 
             # Status message area
             status_msg = gr.Textbox(label="Status", interactive=False)
 
-            # Output image
-            output_image = gr.Image(label="Generated Image", type="pil")
+            # Create tabs for organizing the interface
+            with gr.Tabs():
+                with gr.TabItem("Image Generation"):
+                    # Output image
+                    output_image = gr.Image(label="Generated Image", type="pil")
 
-            # Output folder selection
-            with gr.Row():
-                output_folder = gr.Textbox(
-                    label="Output Folder",
-                    value=self.output_dir,
-                    interactive=True
-                )
-                browse_folder_btn = gr.Button("Browse...")
+                    # Output folder selection
+                    with gr.Row():
+                        output_folder = gr.Textbox(
+                            label="Output Folder",
+                            value=self.output_dir,
+                            interactive=True
+                        )
+                        browse_folder_btn = gr.Button("Browse...")
 
-            # Filename input
-            filename_input = gr.Textbox(
-                label="Filename (without extension)",
-                value=f"generated_image_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            )
+                    # Filename input
+                    filename_input = gr.Textbox(
+                        label="Filename (without extension)",
+                        value=f"generated_image_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    )
 
-            # Save options
-            with gr.Row():
-                save_btn = gr.Button("Save Image")
-                download_btn = gr.Button("Download Image", visible=True)
+                    # Save options
+                    with gr.Row():
+                        save_btn = gr.Button("Save Image")
+                        download_btn = gr.Button("Download Image", visible=True)
 
-            # File download component
-            download_file = gr.File(label="Download Image", visible=False)
+                    # File download component
+                    download_file = gr.File(label="Download Image", visible=False)
+
+                    # Button to trigger 3D reconstruction
+                    reconstruct_3d_btn = gr.Button("Reconstruct 3D Face")
+
+                with gr.TabItem("3D Reconstruction (DECA)"):
+                    # Visualization image from reconstruction
+                    vis_image = gr.Image(label="3D Reconstruction Visualization", type="filepath")
+
+                    # 3D viewer for .obj files
+                    output_3d_viewer = gr.Model3D(label="3D Reconstruction")
+
+                    # Output folder selection
+                    with gr.Row():
+                        output_folder_3d = gr.Textbox(
+                            label="Output Folder",
+                            value=self.output_dir,
+                            interactive=True
+                        )
+                        browse_folder_btn_3d = gr.Button("Browse...")
+
+                    # Filename input
+                    filename_input_3d = gr.Textbox(
+                        label="Filename (without extension)",
+                        value=f"reconstructed_3d_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    )
+
+                    # Save options
+                    with gr.Row():
+                        save_btn_3d = gr.Button("Save 3D Model")
+                        download_btn_3d = gr.Button("Download 3D Model", visible=True)
+
+                    # File download component
+                    download_file_3d = gr.File(label="Download 3D Model", visible=False)
 
             # Event handlers
+            # Event handlers for 3D Reconstruction tab
+            browse_folder_btn_3d.click(
+                self.browse_output_folder,
+                inputs=None,
+                outputs=output_folder_3d
+            )
+
+            save_btn_3d.click(
+                self.save_3d_model_to_folder,
+                inputs=[output_3d_viewer, output_folder_3d, filename_input_3d],
+                outputs=status_msg
+            )
+
+            download_btn_3d.click(
+                self.prepare_3d_download,
+                inputs=[output_3d_viewer, filename_input_3d],
+                outputs=[download_file_3d, status_msg]
+            )
+
+            # Add event handler for 3D reconstruction button
+            reconstruct_3d_btn.click(
+                self.reconstruct_3d_face,
+                inputs=[output_image, output_folder_3d],
+                outputs=[progress, status_msg, output_3d_viewer, vis_image, filename_input_3d]
+            )
+
             model_dropdown.change(
                 self.update_resolution_options,
                 inputs=model_dropdown,
@@ -204,10 +273,12 @@ class ImageGeneratorGUI:
 
             # Return test image or a placeholder
             if test_image:
+                self.last_generated_image = test_image
                 yield 100, test_image, "Test mode: Completed with test image", new_filename
             else:
                 # Create a simple placeholder image with text
                 img = Image.new('RGB', (512, 512), color=(73, 109, 137))
+                self.last_generated_image = img
                 yield 100, img, "Test mode: Completed with placeholder image", new_filename
             return
 
@@ -224,6 +295,7 @@ class ImageGeneratorGUI:
                 yield 30, None, f"Generating image with {model}...", new_filename
                 image = self.api_handler.text_to_image(model, resolution, prompt)
                 yield 70, None, "Processing generated image...", new_filename
+                self.last_generated_image = image
                 yield 100, image, f"Image successfully generated with {model}", new_filename
 
             elif mode == "img2img":
@@ -244,6 +316,7 @@ class ImageGeneratorGUI:
                         raise
 
                 yield 70, None, "Finalizing image...", new_filename
+                self.last_generated_image = image
                 yield 100, image, f"Image successfully edited with {model_used}", new_filename
 
         except Exception as e:
@@ -297,5 +370,115 @@ class ImageGeneratorGUI:
 
             # Make the download component visible and return the file path
             return gr.update(value=temp_path, visible=True), f"Click the download button above to save {filename}"
+        except Exception as e:
+            return gr.update(visible=False), f"Error preparing download: {str(e)}"
+
+    def reconstruct_3d_face(self, input_image, output_folder):
+        """
+        Process the input image to create a 3D face reconstruction
+        """
+        if input_image is None:
+            return 0, "No image to process", None, None, ""
+
+        try:
+            # Generate a new filename based on timestamp
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            new_filename = f"face_{timestamp}"
+
+            # Update progress
+            yield 10, "Starting 3D face reconstruction...", None, None, new_filename
+
+            # Ensure output folder exists
+            if not os.path.exists(output_folder):
+                os.makedirs(output_folder)
+
+            # Update progress
+            yield 30, "Detecting face in image...", None, None, new_filename
+
+            # Determine device
+            # device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            # yield 40, f"Using {device} for processing...", None, None, new_filename
+
+            # Process the image
+            yield 50, "Reconstructing 3D face model...", None, None, new_filename
+
+            # Call the face reconstruction function
+            result_paths = reconstruct_3d_face(
+                input_image=input_image,
+                save_folder=output_folder,
+                device='cuda',
+                save_depth=False,
+                save_obj=True,
+                save_vis=True
+            )
+            
+            # result_paths = {
+            #     'obj_path' : 'None',
+            #     'vis_path' : 'None',
+            # }
+
+            yield 80, "Processing complete, loading results...", None, None, new_filename
+
+            # Get the paths from the result
+            obj_path = result_paths.get('obj_path')
+            vis_path = result_paths.get('vis_path')
+
+            # Update the filename input with the actual filename
+            if obj_path:
+                base_filename = os.path.basename(obj_path)
+                new_filename = os.path.splitext(base_filename)[0]
+
+            # Return the results
+            yield 100, "3D reconstruction completed successfully!", obj_path, vis_path, new_filename
+
+        except Exception as e:
+            yield 100, f"Error in 3D reconstruction: {str(e)}", None, None, new_filename
+
+    def save_3d_model_to_folder(self, model_path, folder_path, filename):
+        if model_path is None:
+            return "No 3D model to save"
+
+        try:
+            # Ensure folder exists
+            if not os.path.exists(folder_path):
+                os.makedirs(folder_path)
+
+            # Clean filename and add extension
+            filename = os.path.basename(filename)
+            if not filename:
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"reconstructed_3d_{timestamp}"
+
+            if not filename.lower().endswith('.obj'):
+                filename += ".obj"
+
+            # Full path to save
+            full_path = os.path.join(folder_path, filename)
+
+            # Copy the model file to the destination
+            if os.path.exists(model_path):
+                shutil.copy2(model_path, full_path)
+                return f"3D model saved to {full_path}"
+            else:
+                return f"Error: Source model file not found at {model_path}"
+        except Exception as e:
+            return f"Error saving 3D model: {str(e)}"
+
+    def prepare_3d_download(self, model_path, filename):
+        if model_path is None:
+            return gr.update(visible=False), "No 3D model to save"
+
+        try:
+            # Clean filename and add extension
+            filename = os.path.basename(filename)
+            if not filename:
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"reconstructed_3d_{timestamp}"
+
+            if not filename.lower().endswith('.obj'):
+                filename += ".obj"
+
+            # Make the download component visible and return the file path
+            return gr.update(value=model_path, visible=True), f"Click the download button above to save {filename}"
         except Exception as e:
             return gr.update(visible=False), f"Error preparing download: {str(e)}"
